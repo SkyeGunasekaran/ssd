@@ -75,9 +75,11 @@ python scripts/get_data_from_hf.py --num-samples 10000
 
 ## Usage
 
-Run benchmark commands from inside the `bench/` directory. Use `--all` for full eval across the four datasets. Use `python -O` for benchmarking to disable debug overhead. `--numseqs` is per-dataset, so `--numseqs 128 --all` runs 128 × 4 = 512 prompts total.
+All commands below run from inside the `bench/` directory. Large models (Llama-3 70B, Qwen-3 32B) take a few minutes for load/warmup/compile before generation starts. Always use `python -O` to disable debug overhead.
 
-Large target (Llama-3 70B, Qwen-3 32B) runs take a few minutes for load/warmup/compile before token generation starts.
+### Benchmarks
+
+Use `--all` for full eval across four datasets. `--numseqs` is per-dataset, so `--numseqs 128 --all` runs 128 × 4 = 512 prompts total.
 
 ```bash
 cd bench
@@ -88,8 +90,33 @@ python -O bench.py --llama --size 70 --gpus 4 --b 1 --temp 0 --numseqs 128 --out
 # Sync spec decode — 70B target + 1B draft, 4 GPUs, k=6
 python -O bench.py --llama --size 70 --gpus 4 --spec --k 6 --b 1 --temp 0 --numseqs 128 --output_len 512 --all
 
-# Async spec decode — 70B target (4 GPUs) + 1B draft (1 GPU), k=7, f=3
+# Async spec decode (SSD) — 70B target (4 GPUs) + 1B draft (1 GPU), k=7, f=3
 python -O bench.py --llama --size 70 --gpus 5 --spec --async --k 7 --f 3 --b 1 --temp 0 --numseqs 128 --output_len 512 --all
 ```
 
-Use `--qwen --size 32` for Qwen models. See `bench/bench.py` for full args. For SGLang/vLLM baselines, see `bench/README.md`, you'll have to make separate environments. 
+Use `--qwen --size 32` for Qwen models. See `bench/bench.py` for full args. For SGLang/vLLM baselines, see `bench/README.md`.
+
+### Chat
+
+Interactive streaming chat with Llama-3.1 70B. Supports AR, sync SD, and async SD (SSD). Pass `--metrics` to print token count, speed, and TTFT after each response.
+
+```bash
+cd bench
+
+# AR — 4 GPUs
+python -O chat.py --ssd --gpus 4
+
+# Sync spec decode — 4 GPUs, k=6
+python -O chat.py --ssd --spec --k 6 --gpus 4
+
+# Async spec decode (SSD) — 5 GPUs, k=7, f=3
+python -O chat.py --ssd --spec --async --k 7 --f 3 --gpus 5 --metrics
+```
+
+SGLang and vLLM chat backends are also supported (launches their servers automatically):
+
+```bash
+python -O chat.py --sglang        # spec decode
+python -O chat.py --sglang --ar   # autoregressive
+python -O chat.py --vllm          # spec decode
+```
