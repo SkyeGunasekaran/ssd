@@ -26,8 +26,6 @@ This custom inference engine supports:
 - Tensor Parallelism
 - PagedAttention, CUDAgraphs, torch compilation, prefix caching
 
-As a result, SSD achieves up to 2x faster inference than some of the strongest inference baselines in the world. 
-
 <div align="center">
   <table><tr><td width="800">
     <video src="https://github.com/user-attachments/assets/588eaa70-d6e5-4522-9e94-e54fc6074aba" />
