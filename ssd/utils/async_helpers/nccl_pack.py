@@ -32,3 +32,22 @@ def recv_int64(pg, src: int, total_length: int, device: torch.device) -> torch.T
     return t
 
 
+# ------------------------------------------------------------------ #
+# Float32 helpers for phi vector communication.                       #
+# Kept as simple standalone sends rather than fused into the int64    #
+# burst because phi is tiny (F floats) and needs float32 precision.  #
+# ------------------------------------------------------------------ #
+
+def send_float32(pg, dst: int, tensor: torch.Tensor):
+    """Send a contiguous float32 tensor."""
+    assert tensor.dtype == torch.float32, (
+        f"send_float32 expects float32, got {tensor.dtype}"
+    )
+    dist.send(tensor.contiguous(), dst=dst, group=pg)
+
+
+def recv_float32(pg, src: int, shape: tuple, device: torch.device) -> torch.Tensor:
+    """Receive a float32 tensor of known shape."""
+    t = torch.empty(shape, dtype=torch.float32, device=device)
+    dist.recv(t, src=src, group=pg)
+    return t

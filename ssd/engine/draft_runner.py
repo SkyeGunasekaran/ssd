@@ -8,7 +8,7 @@ from ssd.engine.model_runner import ModelRunner
 from ssd.config import Config
 from ssd.utils.context import set_context, reset_context
 from ssd.utils.async_helpers.async_spec_helpers import get_forked_recovery_tokens_from_logits, make_glue_decode_input_ids
-from ssd.utils.async_helpers.nccl_pack import recv_int64
+from ssd.utils.async_helpers.nccl_pack import recv_int64, recv_float32
 from ssd.engine.helpers.cudagraph_helpers import flush_draft_profile
 
 PROFILE_DRAFT = os.environ.get("SSD_PROFILE_DRAFT", "0") == "1"
@@ -341,6 +341,20 @@ class DraftRunner(ModelRunner):
                     n_ext = extend_counts[i].item()
                     print(f"  Seq {seq_id}: keep_idx={keep_idx}, recovery_token={rec_token_target} ('{rec_token_text}'), n_ext={n_ext}", flush=True)
                 print(f"{'='*80}\n", flush=True)
+
+        # ------------------------------------------------------------------ #
+        # Phi recv (adaptive logit shaping).                                  #
+        # Must be recvd here — after all target sends and before any          #
+        # sampler calls in hit_cache_and_respond / jit_speculate /            #
+        # _decode_tree.  Gated on use_phi so non-phi runs are unaffected.    #
+        # ------------------------------------------------------------------ #
+        if self.config.use_phi:
+            phi = recv_float32(
+                self.async_pg, src=0,
+                shape=(self.config.async_fan_out,),
+                device=self.device,
+            )
+            self.sampler.set_phi(phi)
 
         out_tokens, out_logits, glue_decode_input_ids, cache_hits, out_activations = self.hit_cache_and_respond(
             cache_keys, B, K, num_tokens, temperatures, draft_block_tables, target_recovery_activations)

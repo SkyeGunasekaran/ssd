@@ -285,6 +285,16 @@ class LLMEngine:
                     draft_runner_rank=self.num_tp_gpus,
                     tokenizer=self.tokenizer,
                     verbose=config.verbose,
+                    # -------------------------------------------------------- #
+                    # Phi params — forwarded from Config so the use_phi gate    #
+                    # is consistent between SpeculatorAsync (send) and          #
+                    # DraftRunner._service_spec_request (recv).                 #
+                    # -------------------------------------------------------- #
+                    use_phi=config.use_phi,
+                    phi_lr=config.phi_lr if config.phi_lr is not None else 0.01,
+                    phi_beta=config.phi_beta if config.phi_beta is not None else 0.9,
+                    phi_max=config.phi_max if config.phi_max is not None else 3.0,
+                    top_k_target=config.top_k_target if config.top_k_target is not None else 32,
                 )
             else:
                 speculator = SpeculatorSync(
@@ -302,6 +312,11 @@ class LLMEngine:
                 jit_speculate=config.jit_speculate,
                 tokenizer=self.tokenizer,
                 metrics=METRICS,
+                # ------------------------------------------------------------ #
+                # Only extract top-K logits when phi is active — this keeps the #
+                # topk() call out of the hot path for non-phi runs.             #
+                # ------------------------------------------------------------ #
+                top_k_target=config.top_k_target if config.use_phi and config.top_k_target is not None else 0,
             )
             return SpecDecodeStep(
                 scheduler=self.scheduler,
@@ -317,7 +332,6 @@ class LLMEngine:
                 model_runner=self.model_runner,
                 tokenizer=self.tokenizer,
             )
-
     def generate(
         self,
         prompts: list[str] | list[list[int]],

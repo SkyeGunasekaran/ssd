@@ -28,6 +28,13 @@ def parse_arguments():
     parser.add_argument("--eager", action="store_true", help="Use eager execution (disable CUDA graphs)")
     parser.add_argument("--gpus", type=int, default=1, help="Total number of gpus")
 
+    # Active Speculative Decoding
+    parser.add_argument("--use_phi", action="store_true", help="Enable active speculative decoding")
+    parser.add_argument("--phi_lr", type=float, default=0.01, help="Phi gradient step size")
+    parser.add_argument("--phi_beta", type=float, default=0.9, help="Phi EMA momentum coefficient")
+    parser.add_argument("--phi_max", type=float, default=3.0, help="Phi upper clip bound")
+    parser.add_argument("--top_k_target", type=int, default=32, help="Number of top-K target logits used for phi gradient")
+    
     # Speculative decoding configuration
     parser.add_argument("--spec", action="store_true", help="Enable speculative decoding")
     parser.add_argument("--eagle", action="store_true", help="Enable eagle speculative decoding (implies --spec, uses default eagle draft for model)")
@@ -174,6 +181,13 @@ def create_llm_kwargs(args, draft_path):
         sampler_x=args.x,
         jit_speculate=(args.backup == "jit"),
         max_steps=args.max_steps,
+        # active speculative decoding
+        use_phi=args.use_phi,
+        phi_lr=args.phi_lr,
+        phi_beta=args.phi_beta,
+        phi_max=args.phi_max,
+        top_k_target=args.top_k_target,
+
     )
 
     if args.flh is not None:

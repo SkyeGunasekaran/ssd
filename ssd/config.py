@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from transformers import AutoConfig
 import torch
 from ssd.paths import DEFAULT_TARGET, DEFAULT_DRAFT
@@ -32,6 +32,17 @@ class Config:
     fan_out_list_miss: list[int] | None = None
     sampler_x: float | None = None 
     jit_speculate: bool = False 
+
+    # ------------------------------------------------------------------ #
+    # Adaptive phi parameters.                                            #
+    # NOTE: trailing commas after default values were previously present  #
+    # and caused each field to be a 1-tuple instead of a scalar — fixed. #
+    # ------------------------------------------------------------------ #
+    use_phi: bool = False
+    phi_lr: float | None = None       # gradient step size; default set in __post_init__
+    phi_beta: float | None = None     # EMA momentum; default set in __post_init__
+    phi_max: float | None = None      # upper projection bound; default set in __post_init__
+    top_k_target: int | None = None   # how many target top-K logits to recv; default set in __post_init__
 
     # eagle3
     use_eagle: bool = False 
@@ -68,7 +79,30 @@ class Config:
                 if self.fan_out_list_miss is None:
                     self.fan_out_list_miss = self.fan_out_list 
                 assert sum(self.fan_out_list_miss) == sum(self.fan_out_list), "ERROR in Config: fan_out_list_miss must be the same as fan_out_list"
-                
+
+                # Pre-compute integer tensors used by DraftRunner._init_prealloc_buffers
+                # and _build_tree_batch.  Kept on CPU here; DraftRunner moves them to
+                # its device inside _init_prealloc_buffers via repeat_interleave.
+                self.fan_out_t = torch.tensor(
+                    self.fan_out_list, dtype=torch.int64)
+                self.fan_out_t_miss = torch.tensor(
+                    self.fan_out_list_miss, dtype=torch.int64)
+
+        # ------------------------------------------------------------------ #
+        # Phi defaults.  Only applied when use_phi=True so that             #
+        # existing runs with use_phi=False are completely unaffected.        #
+        # ------------------------------------------------------------------ #
+        if self.use_phi:
+            assert self.draft_async, "use_phi requires draft_async=True"
+            if self.phi_lr is None:
+                self.phi_lr = 0.01
+            if self.phi_beta is None:
+                self.phi_beta = 0.9
+            if self.phi_max is None:
+                self.phi_max = 3.0
+            if self.top_k_target is None:
+                self.top_k_target = 32
+
         if self.use_eagle:
             if self.eagle_layers is None:
                 L = self.hf_config.num_hidden_layers

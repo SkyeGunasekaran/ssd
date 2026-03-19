@@ -71,6 +71,17 @@ class SpecDecodeStep(InferenceStep):
         self.tokenizer = tokenizer
         self.async_spec = async_spec
 
+        # ------------------------------------------------------------------ #
+        # Stash top-K target logits from the previous verification step so   #
+        # they can be forwarded into speculate() on the *next* decode step.  #
+        # This is a 1-step delay: phi is updated with logits from round N-1  #
+        # before speculation begins in round N, which is correct and         #
+        # expected for an online gradient method.                             #
+        # Both are None on the first step (no prior verification exists).    #
+        # ------------------------------------------------------------------ #
+        self._prev_top_k_vals = None  # [B, K, top_k] or None
+        self._prev_top_k_idxs = None  # [B, K, top_k] or None
+
     def prefill(self, seqs: list[Sequence]) -> int:
         # When doing async speculation and not Eagle, we can do draft and target prefills in parallel.
         if not self.eagle and self.async_spec:
@@ -85,6 +96,10 @@ class SpecDecodeStep(InferenceStep):
             assert seq.recovery_token_id is not None
             seq.num_cached_tokens = seq.num_prompt_tokens
             seq.num_draft_cached_tokens = seq.num_prompt_tokens
+
+        # Prefill does not produce draft-step logits, so clear any stale state.
+        self._prev_top_k_vals = None
+        self._prev_top_k_idxs = None
 
         return sum(len(seq) for seq in seqs)
 
@@ -106,8 +121,18 @@ class SpecDecodeStep(InferenceStep):
             recovery_tokens=[],
             eagle_acts=eagle_sentinel,
         )
+
         #### STEP 1: SPECULATE ####
-        speculate_result = self.speculator.speculate(seqs, in_verify_result)
+        # Forward top-K logits from the *previous* verification into speculate()
+        # so SpeculatorAsync can update phi before sending it to the draft.
+        # On the first decode step both are None and phi stays at its zero
+        # initialisation, which is the correct default.
+        speculate_result = self.speculator.speculate(
+            seqs,
+            in_verify_result,
+            target_top_k_vals=self._prev_top_k_vals,
+            target_top_k_idxs=self._prev_top_k_idxs,
+        )
 
         if _prof:
             torch.cuda.synchronize()
@@ -124,6 +149,11 @@ class SpecDecodeStep(InferenceStep):
 
         #### STEP 2: VERIFY ####
         out_verify_result = self.verifier.verify(seqs, speculate_result, eagle=self.eagle)
+
+        # Stash top-K logits for the *next* decode step's phi update.
+        # These may be None when use_phi=False (top_k_target==0 on the verifier).
+        self._prev_top_k_vals = out_verify_result.target_top_k_vals
+        self._prev_top_k_idxs = out_verify_result.target_top_k_idxs
 
         if _prof:
             torch.cuda.synchronize()

@@ -20,6 +20,13 @@ class Verifier(VerifierBase):
         jit_speculate: bool = False,
         tokenizer: AutoTokenizer = None,
         metrics: dict = None,
+        # ------------------------------------------------------------------ #
+        # When top_k_target > 0 the verifier extracts the top-K logit vals   #
+        # and indices from logits_p[:, :K, :] and stores them on the         #
+        # returned VerifyResult so SpeculatorAsync can update phi next step.  #
+        # Set to 0 (default) to leave all existing behaviour untouched.      #
+        # ------------------------------------------------------------------ #
+        top_k_target: int = 0,
     ):
         super().__init__(lookahead, device)
         self.target_model_runner = target_model_runner
@@ -28,6 +35,7 @@ class Verifier(VerifierBase):
         self.jit_speculate = jit_speculate
         self.tokenizer = tokenizer
         self.metrics = metrics
+        self.top_k_target = top_k_target
 
     def prefill(self, seqs: list[Sequence], eagle: bool = False) -> VerifyResult:
         result = self.target_model_runner.call("run", seqs, True)
@@ -145,9 +153,27 @@ class Verifier(VerifierBase):
         eagle_acts = None
         if eagle:
             eagle_acts = eagle_acts_flat.view(batch_size, self.lookahead + 1, -1)
-        
+
+        # ------------------------------------------------------------------ #
+        # Extract top-K target logits for phi gradient computation.          #
+        # logits_p is [B, K+1, V]; we only need the first K positions        #
+        # (the K draft steps), not the K+1-th recovery position.             #
+        # This is a no-op when top_k_target == 0.                            #
+        # ------------------------------------------------------------------ #
+        target_top_k_vals = None
+        target_top_k_idxs = None
+        if self.top_k_target > 0:
+            # logits_p[:, :K, :] — [B, K, V], stay on GPU, no sync
+            with torch.no_grad():
+                top_k_out = logits_p[:, :self.lookahead, :].topk(
+                    self.top_k_target, dim=-1)
+            target_top_k_vals = top_k_out.values   # [B, K, top_k]
+            target_top_k_idxs = top_k_out.indices  # [B, K, top_k]
+
         return VerifyResult(
             new_suffixes=new_suffixes,
             recovery_tokens=recovery_tokens,
             eagle_acts=eagle_acts,
+            target_top_k_vals=target_top_k_vals,
+            target_top_k_idxs=target_top_k_idxs,
         )

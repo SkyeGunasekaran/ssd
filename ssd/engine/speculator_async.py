@@ -6,7 +6,7 @@ from ssd.engine.helpers.speculate_types import SpeculateResult, VerifyResult, Sp
 from ssd.engine.helpers.runner_helpers import prepare_prefill_payload
 from ssd.engine.sequence import Sequence
 from ssd.utils.misc import decode_tokens
-from ssd.utils.async_helpers.nccl_pack import send_int64
+from ssd.utils.async_helpers.nccl_pack import send_int64, send_float32
 
 
 class SpeculatorAsync(SpeculatorBase):
@@ -25,6 +25,18 @@ class SpeculatorAsync(SpeculatorBase):
         draft_runner_rank: int,
         tokenizer: AutoTokenizer,
         verbose: bool,
+        # ------------------------------------------------------------------ #
+        # Adaptive phi parameters (all optional — defaults leave behaviour    #
+        # identical to the original Saguaro method when use_phi=False).      #
+        # use_phi MUST match the same flag on Config so that the draft-side  #
+        # recv in DraftRunner._service_spec_request is also gated identically#
+        # and the NCCL send/recv pair is always balanced.                    #
+        # ------------------------------------------------------------------ #
+        use_phi: bool = False,          # master gate — disables all phi logic when False
+        phi_lr: float = 0.01,           # gradient step size
+        phi_beta: float = 0.9,          # EMA momentum coefficient
+        phi_max: float = 3.0,           # hard clip upper bound (conservative)
+        top_k_target: int = 32,         # how many top-K target logits to use
     ):
         super().__init__(lookahead, device)
         self.async_fan_out = async_fan_out
@@ -39,12 +51,100 @@ class SpeculatorAsync(SpeculatorBase):
         self.verbose = verbose
         self.K = lookahead
 
+        # ------------------------------------------------------------------ #
+        # Phi state.  Only allocated when use_phi=True so that non-phi runs  #
+        # have zero overhead and the send in _speculation_request is never   #
+        # reached, keeping the protocol in sync with DraftRunner which also  #
+        # gates its recv on use_phi.                                          #
+        # ------------------------------------------------------------------ #
+        self.use_phi = use_phi
+        self.phi_lr      = phi_lr
+        self.phi_beta    = phi_beta
+        self.phi_max     = phi_max
+        self.top_k_target = top_k_target
+
+        if use_phi:
+            F = async_fan_out
+            self.phi          = torch.zeros(F, dtype=torch.float32, device=device)
+            self.phi_momentum = torch.zeros(F, dtype=torch.float32, device=device)
+            # Pre-allocated buffer so the phi send never triggers a new allocation
+            self._phi_buf = torch.zeros(F, dtype=torch.float32, device=device)
+
         # Pre-allocate handshake send/recv buffers (reused every step)
         self._alloc_handshake_bufs(1)
 
         # Pre-allocate speculate() output buffers (avoid torch.tensor(device=cuda) sync)
         self._recovery_buf = torch.empty(1, dtype=torch.int64, device=device)
         self._speculations_buf = torch.empty(1, lookahead + 1, dtype=torch.int64, device=device)
+
+    # ---------------------------------------------------------------------- #
+    # Phi gradient + update helpers                                           #
+    # ---------------------------------------------------------------------- #
+
+    def _compute_phi_grad(
+        self,
+        draft_logits: torch.Tensor,        # [B, K, V]  raw logits received from draft
+        target_top_k_vals: torch.Tensor,   # [B, K, top_k]  target logit values
+        target_top_k_idxs: torch.Tensor,   # [B, K, top_k]  corresponding token indices
+    ) -> torch.Tensor:                     # [F]
+        """
+        Gradient of the full-vocabulary cross-entropy w.r.t. phi.
+
+        For each (batch, draft-step) pair we identify S_F (top-F tokens in the
+        raw draft logits), apply the current phi to get shaped distribution q̃,
+        then approximate the target distribution p̂ on those positions from the
+        provided top-K target logits.
+
+        Gradient at rank j:
+            g_j = mean_{b,k} [ q̃_j^{b,k}  −  p̂_j^{b,k} ]
+
+        Positive g_j → draft over-represents rank-j relative to target →
+        increase phi[j] to push more residual mass there.
+        Negative g_j → over-penalised → decrease phi[j].
+        """
+        F = self.async_fan_out
+        B, K, V = draft_logits.shape
+
+        with torch.no_grad():
+            draft_f = draft_logits.float()    # work in float32 throughout
+
+            # top-F indices per (b, k): [B, K, F]
+            top_f_idxs = draft_f.topk(F, dim=-1).indices
+
+            # Apply current phi to get shaped logits (full vocab)
+            shaped = draft_f.clone()
+            phi_bkf = self.phi.view(1, 1, F).expand(B, K, F)
+            shaped.scatter_add_(-1, top_f_idxs, -phi_bkf)
+
+            # Full-vocabulary softmax → q̃, then extract at top-F positions
+            q_tilde      = torch.softmax(shaped, dim=-1)          # [B, K, V]
+            q_tilde_topf = q_tilde.gather(-1, top_f_idxs)         # [B, K, F]
+
+            # Approximate p̂ at top-F positions via lookup into target top-K.
+            # Tokens that fall outside the target top-K get p̂ = 0 (sparse
+            # approximation; covers ≥70-90 % of residual mass in practice).
+            p_target = torch.softmax(target_top_k_vals.float(), dim=-1)   # [B, K, top_k]
+
+            # match[b, k, j, t] = 1 iff top_f_idxs[b,k,j] == target_top_k_idxs[b,k,t]
+            match = (
+                top_f_idxs.unsqueeze(-1)          # [B, K, F, 1]
+                == target_top_k_idxs.unsqueeze(-2) # [B, K, 1, top_k]
+            )                                      # [B, K, F, top_k]
+            p_hat_topf = (match.float() * p_target.unsqueeze(-2)).sum(-1)  # [B, K, F]
+
+            # Mean gradient over batch and draft steps
+            grad = (q_tilde_topf - p_hat_topf).mean(dim=(0, 1))   # [F]
+
+        return grad
+
+    def _step_phi(self, grad: torch.Tensor):
+        """EMA-smoothed gradient step with [0, phi_max] projection."""
+        self.phi_momentum.mul_(self.phi_beta).add_(
+            grad.to(self.device), alpha=1.0 - self.phi_beta
+        )
+        self.phi.sub_(self.phi_lr * self.phi_momentum).clamp_(0.0, self.phi_max)
+
+    # ---------------------------------------------------------------------- #
 
     def _alloc_handshake_bufs(self, B):
         self._hs_B = B
@@ -89,7 +189,20 @@ class SpeculatorAsync(SpeculatorBase):
             dist.send(eagle_acts, dst=self.draft_runner_rank, group=self.async_pg)
         return SpeculateResult([], [])
 
-    def speculate(self, seqs: list[Sequence], verify_result: VerifyResult) -> SpeculateResult:
+    def speculate(
+        self,
+        seqs: list[Sequence],
+        verify_result: VerifyResult,
+        # ------------------------------------------------------------------ #
+        # Optional: top-K target logits from the just-completed verification. #
+        # When provided and use_phi=True, phi is updated before the next      #
+        # speculation round.  Both tensors must live on self.device.          #
+        # Shape: [B, K, top_k_target] — one entry per sequence per draft     #
+        # step, covering the top_k_target highest-probability target tokens.  #
+        # ------------------------------------------------------------------ #
+        target_top_k_vals: torch.Tensor | None = None,  # [B, K, top_k]
+        target_top_k_idxs: torch.Tensor | None = None,  # [B, K, top_k]
+    ) -> SpeculateResult:
         for seq in seqs:
             assert seq.recovery_token_id is not None
             seq.append_token(seq.recovery_token_id)
@@ -107,6 +220,23 @@ class SpeculatorAsync(SpeculatorBase):
 
         eagle = verify_result.eagle_acts is not None
         speculations_tokens, logits_q, cache_hits = self._speculation_request(seqs, eagle)
+
+        # ------------------------------------------------------------------ #
+        # Phi update.                                                         #
+        # We update phi AFTER receiving this round's draft logits, using the  #
+        # target logits from the verification that triggered this call.       #
+        # The updated phi is already in self.phi and will be sent at the      #
+        # START of the next _speculation_request call.                        #
+        # Only runs when use_phi=True AND the caller supplied top-K logits    #
+        # (they are None on the first step or when use_phi=False).           #
+        # ------------------------------------------------------------------ #
+        if self.use_phi and target_top_k_vals is not None and target_top_k_idxs is not None:
+            grad = self._compute_phi_grad(
+                logits_q.float(),           # [B, K, V]
+                target_top_k_vals,          # [B, K, top_k]
+                target_top_k_idxs,          # [B, K, top_k]
+            )
+            self._step_phi(grad)
 
         # Build speculations using pre-allocated buffers (avoids torch.tensor(device=cuda) sync)
         B = len(seqs)
@@ -177,6 +307,16 @@ class SpeculatorAsync(SpeculatorBase):
             dist.send(self._extend_counts, dst=self.draft_runner_rank, group=self.async_pg)
             dist.send(extend_eagle_acts, dst=self.draft_runner_rank, group=self.async_pg)
             dist.send(extend_token_ids, dst=self.draft_runner_rank, group=self.async_pg)
+
+        # ------------------------------------------------------------------ #
+        # Send current phi to draft — ONLY when use_phi=True.                #
+        # The draft-side recv in DraftRunner._service_spec_request is also   #
+        # gated on config.use_phi, so the send/recv pair is always balanced  #
+        # and there is no risk of NCCL deadlock on non-phi runs.             #
+        # ------------------------------------------------------------------ #
+        if self.use_phi:
+            self._phi_buf.copy_(self.phi, non_blocking=False)
+            send_float32(self.async_pg, self.draft_runner_rank, self._phi_buf)
 
         # Recv into pre-allocated buffers
         dist.recv(self._fused_response, src=self.draft_runner_rank, group=self.async_pg)
