@@ -142,7 +142,7 @@ class SpeculatorAsync(SpeculatorBase):
         self.phi_momentum.mul_(self.phi_beta).add_(
             grad.to(self.device), alpha=1.0 - self.phi_beta
         )
-        self.phi.sub_(self.phi_lr * self.phi_momentum).clamp_(0.0, self.phi_max)
+        self.phi.add_(self.phi_lr * self.phi_momentum).clamp_(0.0, self.phi_max)
 
     # ---------------------------------------------------------------------- #
 
