@@ -1,0 +1,13 @@
+python -O bench/bench.py --qwen --size 8 --draft 0.6 --gpus 2 --spec --async     --k 7 --f 3 --b 1 --temp 0 --numseqs 128 --output_len 512 --all     --name baseline_no_phi --wandb
+
+wandb: Run summary:
+wandb:        metrics_avg_accepted_suffix_lens_on_hit 5.50398
+wandb: metrics_avg_accepted_suffix_lens_with_recovery 5.00496
+wandb:                         metrics_avg_cache_hits 0.80861
+wandb:                metrics_avg_target_step_time_ms 30.93987
+wandb:                      metrics_decode_throughput 162.32994
+wandb:                     metrics_prefill_throughput 11670.39864
+wandb:                                           mode CUDA Graphs + Specul...
+wandb:                                     model_name Qwen3-8B
+wandb:                 official_end_to_end_throughput 160.9124
+wandb:                            official_total_time 1629.11003
