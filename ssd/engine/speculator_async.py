@@ -37,6 +37,7 @@ class SpeculatorAsync(SpeculatorBase):
         phi_beta: float = 0.9,          # EMA momentum coefficient
         phi_max: float = 3.0,           # hard clip upper bound (conservative)
         top_k_target: int = 32,         # how many top-K target logits to use
+        phi_lambda: float = 0.5,        # fidelity regularization weight (λ from adversarial loss)
     ):
         super().__init__(lookahead, device)
         self.async_fan_out = async_fan_out
@@ -62,6 +63,7 @@ class SpeculatorAsync(SpeculatorBase):
         self.phi_beta    = phi_beta
         self.phi_max     = phi_max
         self.top_k_target = top_k_target
+        self.phi_lambda  = phi_lambda
 
         if use_phi:
             F = async_fan_out
@@ -76,6 +78,7 @@ class SpeculatorAsync(SpeculatorBase):
         # Pre-allocate speculate() output buffers (avoid torch.tensor(device=cuda) sync)
         self._recovery_buf = torch.empty(1, dtype=torch.int64, device=device)
         self._speculations_buf = torch.empty(1, lookahead + 1, dtype=torch.int64, device=device)
+
 
     # ---------------------------------------------------------------------- #
     # Phi gradient + update helpers                                           #
@@ -138,11 +141,43 @@ class SpeculatorAsync(SpeculatorBase):
         return grad
 
     def _step_phi(self, grad: torch.Tensor):
-        """EMA-smoothed gradient step with [0, phi_max] projection."""
+        """EMA-smoothed gradient step with fidelity regularization and
+        [0, phi_max] projection.
+
+        Implements the gradient of the adversarial loss from Eq. 1:
+            L(θ; λ) = D_KL(q̃ ∥ p)  −  λ · Σ_{t∈S_F} s_β(p(t) − q̃(t))
+
+        The `grad` argument is the cache-player gradient (second term):
+            g_j = q̃_j − p̂_j
+
+        The fidelity-player gradient (first term) pulls phi back toward
+        zero — keeping the shaped draft close to the target to preserve
+        acceptance rate.  We implement this as an L2 penalty on phi,
+        which is the linearised restoring force of D_KL around phi = 0:
+            fidelity_grad_j = phi_lambda · phi[j]
+
+        The combined update is:
+            momentum ← β · momentum + (1−β) · (grad + λ · phi)
+            phi     ← clamp(phi + lr · momentum, 0, phi_max)
+
+        The parameter phi_lambda controls the tradeoff between cache hit
+        rate and acceptance rate.  It maps directly to the critical
+        threshold λ* from Theorem 1 of the paper: values below the
+        threshold produce a stable equilibrium; values above it cause
+        the boundary collision bifurcation (oscillation / divergence).
+        """
+        # ------------------------------------------------------------------ #
+        # Fidelity regularisation: ∇_phi D_KL ≈ phi_lambda · phi            #
+        # This is the restoring force that prevents phi from overshooting    #
+        # into the unstable regime (λ > λ*).                                #
+        # ------------------------------------------------------------------ #
+        regularized_grad = grad.to(self.device) + self.phi_lambda * self.phi
+
         self.phi_momentum.mul_(self.phi_beta).add_(
-            grad.to(self.device), alpha=1.0 - self.phi_beta
+            regularized_grad, alpha=1.0 - self.phi_beta
         )
         self.phi.add_(self.phi_lr * self.phi_momentum).clamp_(0.0, self.phi_max)
+
 
     # ---------------------------------------------------------------------- #
 
