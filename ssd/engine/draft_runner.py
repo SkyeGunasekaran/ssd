@@ -772,6 +772,21 @@ class DraftRunner(ModelRunner):
         next_tokens = logits_flat.argmax(dim=-1) if payload["_all_greedy"] else self.sampler(logits_flat, payload["temps"], is_tree=True)
         spec_tokens[:, depth] = next_tokens
         
+        # ------------------------------------------------------------------ #
+        # Apply phi to spec_logits so the verifier sees the same distribution #
+        # the sampler used.  Without this, the verifier reconstructs q from   #
+        # raw logits while tokens were sampled from q̃ (phi-adjusted),        #
+        # causing systematic over-rejection.                                  #
+        # Only active when phi is set and we're not on the greedy path.       #
+        # ------------------------------------------------------------------ #
+        if self.sampler.phi is not None and not payload["_all_greedy"]:
+            F = self.sampler.phi.shape[0]
+            top_f_idxs = spec_logits[:, depth, :].topk(F, dim=-1).indices
+            phi_row = self.sampler.phi.to(device=spec_logits.device, dtype=spec_logits.dtype).unsqueeze(0).expand(
+                spec_logits.shape[0], -1
+            )
+            spec_logits[:, depth, :].scatter_add_(-1, top_f_idxs, -phi_row)
+        
         return next_tokens
 
     def _decode_tree(self, payload):
