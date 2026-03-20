@@ -19,23 +19,22 @@ python -O bench/bench.py --qwen --size 8 --draft 0.6 --gpus 2 --spec --async    
 Model: Qwen3-8B, Mode: CUDA Graphs + Speculative(k=7) + Async + JIT, Total: 262144tok, Time: 2179.32s, Total Throughput: 120.29tok/s
 
 python -O bench/bench.py --qwen --size 8 --draft 0.6 --gpus 2 --spec --async     --k 7 --f 3 --b 1 --temp 0.7 --numseqs 128 --output_len 512 --all     --use_phi --phi_lr 0.01 --phi_beta 0.9 --phi_max 5.0 --top_k_target 32                                   
-Final Prefill Throughput: 10979tok/s
-Final Decode Throughput: 118tok/s
-[metrics] Avg Tokens per step (incl recovery): 3.89
-[metrics] Avg Fraction of Speculated Tokens Accepted: 0.41
-[metrics] Avg target time per full step (ms): 32.84
-[metrics] Avg target verify time (ms): 25.47
-[metrics] Avg Cache Hits: 0.78
-[metrics] Avg Tokens per step on Cache Hit: 4.12
+Final Prefill Throughput: 8696tok/s
+Final Decode Throughput: 67tok/s
+[metrics] Avg Tokens per step (incl recovery): 2.15
+[metrics] Avg Fraction of Speculated Tokens Accepted: 0.16
+[metrics] Avg target time per full step (ms): 31.71
+[metrics] Avg target verify time (ms): 25.46
+[metrics] Avg Cache Hits: 0.88
+[metrics] Avg Tokens per step on Cache Hit: 2.20
 [metrics] Empirical frequencies of accepted_suffix_lens_on_hit - 1:
-  0: 0.247
-  1: 0.159
-  2: 0.115
-  3: 0.079
-  4: 0.059
-  5: 0.046
-  6: 0.038
-  7: 0.257
-[metrics] Avg Tokens per step on Cache Miss: 3.08
-Model: Qwen3-8B, Mode: CUDA Graphs + Speculative(k=7) + Async + JIT, Total: 262144tok, Time: 2224.26s, Total Throughput: 117
-.86tok/s
+  0: 0.570
+  1: 0.185
+  2: 0.082
+  3: 0.042
+  4: 0.026
+  5: 0.018
+  6: 0.012
+  7: 0.065
+[metrics] Avg Tokens per step on Cache Miss: 1.82
+Model: Qwen3-8B, Mode: CUDA Graphs + Speculative(k=7) + Async + JIT, Total: 262144tok, Time: 3879.23s, Total Throughput: 67.58tok/s       

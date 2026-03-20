@@ -43,6 +43,7 @@ class Config:
     phi_beta: float | None = None     # EMA momentum; default set in __post_init__
     phi_max: float | None = None      # upper projection bound; default set in __post_init__
     top_k_target: int | None = None   # how many target top-K logits to recv; default set in __post_init__
+    phi_lambda: float | None = None   # fidelity regularization weight (λ from adversarial loss); default set in __post_init__
 
     # eagle3
     use_eagle: bool = False 
@@ -102,6 +103,8 @@ class Config:
                 self.phi_max = 3.0
             if self.top_k_target is None:
                 self.top_k_target = 32
+            if self.phi_lambda is None:
+                self.phi_lambda = 0.5
 
         if self.use_eagle:
             if self.eagle_layers is None:

@@ -34,6 +34,7 @@ def parse_arguments():
     parser.add_argument("--phi_beta", type=float, default=0.9, help="Phi EMA momentum coefficient")
     parser.add_argument("--phi_max", type=float, default=3.0, help="Phi upper clip bound")
     parser.add_argument("--top_k_target", type=int, default=32, help="Number of top-K target logits used for phi gradient")
+    parser.add_argument("--phi_lambda", type=float, default=0.5, help="Fidelity regularization weight (lambda from adversarial loss). Controls tradeoff between cache hit rate and acceptance rate. 0 = pure cache optimization, higher = more fidelity preservation.")
     
     # Speculative decoding configuration
     parser.add_argument("--spec", action="store_true", help="Enable speculative decoding")
@@ -187,6 +188,7 @@ def create_llm_kwargs(args, draft_path):
         phi_beta=args.phi_beta,
         phi_max=args.phi_max,
         top_k_target=args.top_k_target,
+        phi_lambda=args.phi_lambda,
 
     )
 
